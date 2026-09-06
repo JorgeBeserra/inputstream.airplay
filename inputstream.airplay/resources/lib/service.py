@@ -350,7 +350,7 @@ def setting_text(name):
 
 
 def hls_enabled():
-    return setting_bool('hls')
+    return setting_bool('hls', True)
 
 
 _FRIENDLY_NAME = []
@@ -558,7 +558,7 @@ def build_item():
     item.setProperty('isrealtimestream', 'true')
     # How far behind the source to sit. Small is responsive but leaves little
     # room for audio to arrive unevenly, which is what makes it drop out.
-    item.setProperty('liveedgemargin', str(setting_int('liveedgemargin', 100)))
+    item.setProperty('liveedgemargin', str(setting_int('liveedgemargin', 300)))
     item.setContentLookup(False)
     # Deliberately no music info tag. Setting one makes Kodi classify the
     # stream as music and hand it to PAPlayer, whose SoftStop fade-out holds a

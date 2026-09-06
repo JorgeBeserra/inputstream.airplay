@@ -17,7 +17,7 @@ msgid "General"
 msgstr ""
 
 msgctxt "#30001"
-msgid "Stream video from apps instead of mirroring"
+msgid "Stream video from apps"
 msgstr ""
 
 msgctxt "#30002"
@@ -41,11 +41,11 @@ msgid "Require this password before a sender may connect. Leave empty to let any
 msgstr ""
 
 msgctxt "#30007"
-msgid "Start mirroring at the live edge"
+msgid "Low latency mode"
 msgstr ""
 
 msgctxt "#30008"
-msgid "Keep the picture closer to the phone by starting from the newest frame rather than the first one decoded. Leaves less buffer, so a stuttering connection shows sooner. Ignored by a Kodi that does not support it."
+msgid "Keep the picture closer to the phone by starting from the newest frame rather than the first one decoded, and hold it to the target latency below. Leaves less buffer, so a stuttering connection shows sooner. Ignored by a Kodi that does not support it."
 msgstr ""
 
 msgctxt "#30009"
@@ -57,11 +57,11 @@ msgid "Sound only reaches Kodi while the phone is making a noise, and the gaps b
 msgstr ""
 
 msgctxt "#30011"
-msgid "How far behind the phone to stay"
+msgid "Target latency"
 msgstr ""
 
 msgctxt "#30012"
-msgid "Smaller means the picture follows the phone more closely, but leaves less room for sound to arrive unevenly, which is what makes it drop out. Raise it if audio breaks up. Applies to the next thing played."
+msgid "How far behind the phone to stay. Smaller means the picture follows the phone more closely, but leaves less room for sound to arrive unevenly, which is what makes it drop out. Raise it if audio breaks up. Applies to the next thing played."
 msgstr ""
 
 msgctxt "#30013"

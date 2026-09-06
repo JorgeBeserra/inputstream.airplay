@@ -24,14 +24,14 @@ input, and a fault there stops a helper rather than taking Kodi down.
 
 | Setting | Default | |
 |---|---|---|
-| Stream video from apps instead of mirroring | off | Apps that support it hand over a playlist rather than mirroring the screen. Video then plays at full quality and the phone's screen can switch off, but only some apps offer it. |
+| Offer screen mirroring | on | Mainly a diagnostic. A phone will not offer the device at all for photos without it. |
+| Play sound from mirroring | on | Sound only reaches Kodi while the phone is making some, and the gaps can make the player rebuffer on a Kodi without the patches below. |
+| Stream video from apps | on | Apps that support it hand over a playlist rather than mirroring the screen. Video then plays at full quality and the phone's screen can switch off, but only some apps offer it. |
 | Let the sender change the volume | on | The phone's volume slider moves Kodi's, and starts where Kodi already is. |
+| Low latency mode | off | Starts a mirroring session at the live edge. Needs a Kodi that supports it; ignored otherwise. |
+| Target latency | 300 ms | How far behind the phone to stay in low latency mode. Smaller follows the phone more closely but leaves less room for sound to arrive unevenly. |
 | Password | empty | Required before a sender may connect. |
 | Ask new devices to pair | off | Shows a four digit code the first time a device connects and remembers it afterwards, as an Apple TV does. |
-| Play sound from mirroring | on | Sound only reaches Kodi while the phone is making some, and the gaps can make the player rebuffer on a Kodi without the patches below. |
-| Offer screen mirroring | on | Mainly a diagnostic. A phone will not offer the device at all for photos without it. |
-| Start mirroring at the live edge | off | Needs a Kodi that supports it; ignored otherwise. |
-| How far behind the phone to stay | 100 ms | Smaller follows the phone more closely but leaves less room for sound to arrive unevenly. |
 | Forget paired devices | -- | Asks every device for the pairing code again the next time it connects. |
 | Verbose logging | off | The whole AirPlay conversation and each packet handed to the player. For diagnosing a problem; see Troubleshooting. |
 
