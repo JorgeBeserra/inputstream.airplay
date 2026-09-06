@@ -491,7 +491,7 @@ PLAYING = {'url': ''}
 # would open the audio stream and then have the video supersede it, and the
 # first one tearing down takes the second with it. So hold the audio start
 # briefly and drop it if a video handoff turns up.
-PENDING_AUDIO = {'due': 0.0}
+PENDING_AUDIO = {'due': 0.0, 'expires': 0.0}
 AUDIO_START_GRACE = 3.0
 
 # A track change arrives as a title and its artwork in separate events, and the
@@ -501,8 +501,15 @@ AUDIO_START_GRACE = 3.0
 PENDING_INFO = {'due': 0.0}
 INFO_PUSH_GRACE = 0.3
 
-# getCurrentWindowDialogId() reports this when no modal dialog is up.
+# getCurrentWindowDialogId() reports this when no dialog is up.
 WINDOW_INVALID = 9999
+
+# A notification toast. Kodi counts it as a dialog, but it is not a modal one:
+# it never drives the render loop, so none of the deadlocks guarded against
+# below can involve it. Counting it meant the add-on's own pairing PIN, shown
+# for half a minute so that it can be read, held back the very session the
+# pairing was for.
+WINDOW_DIALOG_KAI_TOAST = 10107
 
 # How long to leave a dialog before looking again, for the work held back
 # while one is open.
@@ -523,10 +530,11 @@ def dialog_open():
     wanted here: it is still driving the render loop at that point.
     """
     try:
-        found = xbmcgui.getCurrentWindowDialogId() != WINDOW_INVALID
+        current = xbmcgui.getCurrentWindowDialogId()
     except Exception:
         # Not worth failing a stop over; treat an unknown GUI state as clear.
         return False
+    found = current not in (WINDOW_INVALID, WINDOW_DIALOG_KAI_TOAST)
     if found:
         DIALOG_LAST_SEEN['at'] = time.time()
     return found
@@ -627,16 +635,27 @@ def start_playback():
         except RuntimeError:
             pass  # it stopped between the two calls; carry on and open it
 
-    # Opening carries the same hazard as stopping: Kodi replaces a running
-    # stream by stopping it first, on the main thread, and a modal dialog runs
-    # that from inside its own render loop. See PENDING_STOP. Come back for it
-    # rather than risk the deadlock -- there is nothing to gain by starting a
-    # session on top of an error the user has not dismissed yet.
-    if dialog_blocking():
-        PENDING_AUDIO['due'] = time.time() + DIALOG_RETRY_GRACE
-        log('a dialog is open, holding the session start until it closes', xbmc.LOGDEBUG)
+    # Opening carries the same hazard as stopping, but only while there is a
+    # player to tear down: Kodi replaces a running stream by stopping it first,
+    # on the main thread, and a modal dialog runs that from inside its own
+    # render loop. See PENDING_STOP. With nothing playing there is no teardown
+    # and so nothing to deadlock against, which is what lets a session start
+    # while the failure dialog from the previous one is still on screen --
+    # a modal that waits for the user is otherwise indefinite.
+    if player.isPlaying() and dialog_blocking():
+        now = time.time()
+        if not PENDING_AUDIO['expires']:
+            PENDING_AUDIO['expires'] = now + STOP_DEFER_LIMIT
+            log('a dialog is open, holding the session start until it closes')
+        elif now >= PENDING_AUDIO['expires']:
+            # Give up rather than force it, as the stop and the handoff do.
+            PENDING_AUDIO.update(due=0.0, expires=0.0)
+            log('dialog still open, abandoning the session start', xbmc.LOGWARNING)
+            return
+        PENDING_AUDIO['due'] = now + DIALOG_RETRY_GRACE
         return
 
+    PENDING_AUDIO['expires'] = 0.0
     log('session started, opening player')
 
     # Replacing a stream that is still running lets its teardown race the new
@@ -977,7 +996,7 @@ def handle_event(line):
     if line == 'EVENT PLAY':
         # Mirroring: open immediately. Any wait here is buffered by the sender
         # and shows up as latency for the whole session.
-        PENDING_AUDIO['due'] = 0.0
+        PENDING_AUDIO.update(due=0.0, expires=0.0)
         start_playback()
     elif line == 'EVENT PLAYAUDIO':
         # Audio: hold briefly, since a video handoff may follow and would
@@ -987,7 +1006,7 @@ def handle_event(line):
         else:
             start_playback()
     elif line == 'EVENT STOP':
-        PENDING_AUDIO['due'] = 0.0
+        PENDING_AUDIO.update(due=0.0, expires=0.0)
         # Nothing left to describe, and the stop below is exactly what a push
         # must not race.
         PENDING_INFO['due'] = 0.0
@@ -1034,7 +1053,8 @@ def handle_event(line):
         TRACK['art'] = line[10:]
         PENDING_INFO['due'] = time.time() + INFO_PUSH_GRACE
     elif line.startswith('EVENT HLS '):
-        PENDING_AUDIO['due'] = 0.0  # this is a video session after all
+        # This is a video session after all.
+        PENDING_AUDIO.update(due=0.0, expires=0.0)
         payload = line[10:].split(' ')
         try:
             url = base64.b64decode(payload[0]).decode('utf-8', 'replace')
