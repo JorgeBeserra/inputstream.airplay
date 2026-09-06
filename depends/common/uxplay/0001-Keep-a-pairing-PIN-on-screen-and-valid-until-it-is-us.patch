@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dom Cobley <popcornmix@gmail.com>
+Date: Sat, 6 Sep 2026 15:40:00 +0100
+Subject: [PATCH] Keep a pairing PIN on screen, and valid, until it is used
+
+raop->pin is set only by the pair-pin-start handler, and consumed by the
+first message of pair-setup-pin. Neither half survives a retry, and a
+sender retries readily: whenever its user mistypes, takes too long, or --
+as iOS does, having paired here before -- offers a remembered password
+without asking for a PIN at all. Each attempt is a fresh connection.
+
+So the second attempt finds raop->pin at 0, and
+
+    snprintf(pin, 6, "%04u", raop->pin % 10000);
+
+makes the SRP password "0000". Nothing is displayed, and the PIN the user
+is still reading off the screen no longer validates. It is also a way in,
+since "0000" is not a secret and is the same on every receiver.
+
+Generate a PIN when there is none, display it on every attempt rather
+than only on the one that made it, and hold it until the pairing actually
+completes. A PIN the application pinned is held above 9999 and is meant
+to outlast a pairing, so that one is left alone.
+
+Signed-off-by: Dom Cobley <popcornmix@gmail.com>
+---
+ lib/raop_handlers.h | 38 ++++++++++++++++++++++++++++++++++----
+ 1 file changed, 34 insertions(+), 4 deletions(-)
+
+diff --git a/lib/raop_handlers.h b/lib/raop_handlers.h
+--- a/lib/raop_handlers.h
++++ b/lib/raop_handlers.h
+@@ -326,10 +326,33 @@
+         method = NULL;
+         plist_get_string_val(req_user_node, &user);
+         logger_log(raop->logger, LOGGER_INFO, "pair-setup-pin:  device_id = %s", user);
++        if (!raop->pin) {
++            /* A sender that has paired here before goes straight to
++             * pair-setup-pin without asking for a PIN first, so there is none
++             * pending. Left alone, raop->pin formats to "0000" below: never
++             * displayed, so it can only be guessed -- and the same on every
++             * receiver. */
++            int pin_4 = random_pin();
++            if (pin_4 < 0) {
++                logger_log(raop->logger, LOGGER_ERR, "Failed to generate random pin");
++            } else {
++                raop->pin = (unsigned short) pin_4 % 10000;
++            }
++        }
+         snprintf(pin, 6, "%04u", raop->pin % 10000);
+-        if (raop->pin < 10000) {
+-            raop->pin = 0;
++
++        /* Show it on every attempt, not only the one that made it. The sender
++         * asks again whenever its user mistypes, takes too long, or -- as iOS
++         * does -- offers a remembered password first, and each attempt is a
++         * fresh connection. The PIN is deliberately not consumed here either:
++         * doing so left the next attempt with none, so what the user was
++         * reading off the screen had already stopped being the answer. */
++        if (raop->callbacks.display_pin) {
++            raop->callbacks.display_pin(raop->callbacks.cls, pin);
+         }
++        logger_log(raop->logger, LOGGER_INFO,
++                   "*** CLIENT MUST NOW ENTER PIN = \"%s\" AS AIRPLAY PASSWORD", pin);
++
+         int ret = srp_new_user(conn->session, raop->pairing, (const char *) user,
+                                (const char *) pin, &salt, &len_salt, &pk, &len_pk);
+         plist_mem_free(user);
+@@ -418,6 +441,12 @@
+             logger_log(raop->logger, LOGGER_DEBUG, "pair-pin-setup success\n");
+         }
+         pairing_session_set_setup_status(conn->session);
++        /* Paired, so retire the PIN and let the next device asking get a new
++         * one. A PIN the application pinned is held above 9999 and is meant to
++         * outlast a pairing, so leave that one where it is. */
++        if (raop->pin < 10000) {
++            raop->pin = 0;
++        }
+         plist_t res_root_node = plist_new_dict();
+         plist_t res_epk_node = plist_new_data((const char *) epk, 32);
+         plist_t res_authtag_node = plist_new_data((const char *) authtag, 16);
+-- 
+2.43.0
+

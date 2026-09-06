@@ -37,9 +37,9 @@ endif()
 # ---------------------------------------------------------------------------
 # AirPlay protocol library
 #
-# UxPlay's lib/, pinned by commit and checksum. Nothing here is patched: the
-# fixes this add-on needed are upstream, and keeping it that way means a newer
-# UxPlay is a two line change rather than a rebasing exercise.
+# UxPlay's lib/, pinned by commit and checksum. Fixes go upstream first and
+# are carried here only until they land, so a newer UxPlay stays close to a two
+# line change rather than a rebasing exercise; see depends/common/uxplay/.
 #
 # Only the protocol half is built. UxPlay's renderers/ and uxplay.cpp are
 # GStreamer, and the point of this add-on is to hand the streams to Kodi
@@ -54,8 +54,8 @@ endif()
 #    live in depends/common/uxplay/ -- keep them in step with the two below.
 #  - Otherwise a plain download, so a bare cmake build works on its own.
 # ---------------------------------------------------------------------------
-set(UXPLAY_VERSION "462153392f2e30937424922039ff9f0cda5e7b1a")
-set(UXPLAY_SHA256 "0f5bf6f2ab3d1ac3ccaf4418afe00137ec1ba97c2a345710202fca40f6a1fb85")
+set(UXPLAY_VERSION "d29dfabe102aba137170121077f55390e875310c")
+set(UXPLAY_SHA256 "d68b043bb7eaf141b506199f0c3aa4b8dc261b4f063cf8ccc9697f22b8539ce2")
 
 set(UXPLAY_SOURCE_DIR "" CACHE PATH "Unpacked UxPlay source, instead of fetching")
 
@@ -66,6 +66,20 @@ set(UXPLAY_SOURCE_DIR "" CACHE PATH "Unpacked UxPlay source, instead of fetching
 if(NOT UXPLAY_SOURCE_DIR AND DEFINED ENV{UXPLAY_SOURCE_DIR})
   set(UXPLAY_SOURCE_DIR "$ENV{UXPLAY_SOURCE_DIR}")
 endif()
+
+# Fixes not yet in a UxPlay release, kept beside the pin. Kodi's add-on
+# buildsystem finds these on its own -- it applies every *.patch in the depends
+# directory -- so they are named for it, and the plain download below is told
+# where they are. A distribution passing UXPLAY_SOURCE_DIR applies its own.
+file(GLOB UXPLAY_PATCHES "${PROJECT_SOURCE_DIR}/depends/common/uxplay/*.patch")
+list(SORT UXPLAY_PATCHES)
+set(UXPLAY_PATCH_COMMAND "")
+foreach(_patch ${UXPLAY_PATCHES})
+  if(UXPLAY_PATCH_COMMAND)
+    list(APPEND UXPLAY_PATCH_COMMAND COMMAND)  # only between commands
+  endif()
+  list(APPEND UXPLAY_PATCH_COMMAND patch -p1 --forward -i "${_patch}")
+endforeach()
 
 if(UXPLAY_SOURCE_DIR)
   if(NOT EXISTS "${UXPLAY_SOURCE_DIR}/lib/raop.h")
@@ -86,6 +100,7 @@ else()
   FetchContent_Declare(uxplay
     URL           "https://github.com/FDH2/UxPlay/archive/${UXPLAY_VERSION}.tar.gz"
     URL_HASH      SHA256=${UXPLAY_SHA256}
+    PATCH_COMMAND ${UXPLAY_PATCH_COMMAND}
     SOURCE_SUBDIR nothing-to-build-here)
   FetchContent_MakeAvailable(uxplay)
 endif()
