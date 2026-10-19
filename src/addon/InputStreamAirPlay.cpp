@@ -13,6 +13,7 @@
 
 #include "InputStreamAirPlay.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 
@@ -37,6 +38,15 @@ constexpr int STREAMINFO_TIMEOUT_MS = 10000;
 /* Longer than any gap between audio frames, short enough that a pause is
  * spotted on the first frame back. Frames arrive a few milliseconds apart. */
 constexpr unsigned int PAUSE_GAP_MS = 500;
+
+using Clock = std::chrono::steady_clock;
+
+int RemainingMs(Clock::time_point deadline)
+{
+  const auto remaining =
+      std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
+  return remaining.count() > 0 ? static_cast<int>(remaining.count()) : 0;
+}
 } // namespace
 
 CInputStreamAirPlay::CInputStreamAirPlay(const kodi::addon::IInstanceInfo& instance)
@@ -49,7 +59,7 @@ CInputStreamAirPlay::~CInputStreamAirPlay()
   Close();
 }
 
-bool CInputStreamAirPlay::SkipPayload(uint32_t size)
+bool CInputStreamAirPlay::SkipPayload(uint32_t size, int timeoutMs)
 {
   if (!size)
     return true;
@@ -58,32 +68,41 @@ bool CInputStreamAirPlay::SkipPayload(uint32_t size)
    * caller has already rejected anything over APX_MAX_PAYLOAD, but there is no
    * reason to take a megabyte of scratch space to throw a megabyte away. */
   uint8_t scratch[8192];
+  const auto deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
   while (size)
   {
     const uint32_t chunk = size < sizeof(scratch) ? size : (uint32_t)sizeof(scratch);
-    if (!ReadExact(scratch, chunk, 2000))
+    if (!ReadExact(scratch, chunk, RemainingMs(deadline)))
       return false;
     size -= chunk;
   }
   return true;
 }
 
-bool CInputStreamAirPlay::ReadExact(void* buf, size_t len, int timeoutMs)
+bool CInputStreamAirPlay::ReadExact(void* buf, size_t len, int timeoutMs, bool idleAllowed)
 {
   auto* p = static_cast<uint8_t*>(buf);
+  const auto deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
   while (len)
   {
-    if (m_fd < 0)
+    if (m_aborted || m_fd < 0)
       return false;
 
     struct pollfd pfd = {m_fd, POLLIN, 0};
-    int rc = poll(&pfd, 1, timeoutMs);
+    const int remaining = RemainingMs(deadline);
+    int rc = remaining > 0 ? poll(&pfd, 1, remaining) : 0;
     if (rc == 0)
-      return false; /* timed out */
+    {
+      /* Only an idle header can be retried on this connection. Once bytes
+       * were consumed, starting a new message would lose framing. */
+      m_eof = !idleAllowed || p != static_cast<uint8_t*>(buf);
+      return false;
+    }
     if (rc < 0)
     {
       if (errno == EINTR)
         continue;
+      m_eof = true;
       return false;
     }
 
@@ -103,6 +122,11 @@ bool CInputStreamAirPlay::ReadExact(void* buf, size_t len, int timeoutMs)
 
 bool CInputStreamAirPlay::Connect()
 {
+  if (m_socketPath.size() >= sizeof(sockaddr_un{}.sun_path))
+  {
+    errno = ENAMETOOLONG;
+    return false;
+  }
   m_fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (m_fd < 0)
   {
@@ -116,8 +140,10 @@ bool CInputStreamAirPlay::Connect()
 
   if (connect(m_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0)
   {
+    const int error = errno;
     close(m_fd);
     m_fd = -1;
+    errno = error;
     return false;
   }
   return true;
@@ -133,8 +159,17 @@ bool CInputStreamAirPlay::TryReconnect()
   /* Reattaching during a teardown would fight the shutdown: Kodi aborts the
    * demuxer by closing our read side, which looks exactly like the receiver
    * going away. */
-  if (m_aborted || m_sessionEnded || ++m_reconnectAttempts > 50)
+  if (m_aborted || m_sessionEnded || m_reconnectAttempts >= 50)
     return false;
+
+  const int waitMs = RemainingMs(m_nextReconnect);
+  if (waitMs > 0)
+  {
+    poll(nullptr, 0, std::min(waitMs, READ_POLL_MS));
+    return !m_aborted;
+  }
+  ++m_reconnectAttempts;
+  m_nextReconnect = Clock::now() + std::chrono::milliseconds(READ_POLL_MS);
 
   if (m_fd >= 0)
   {
@@ -153,6 +188,7 @@ bool CInputStreamAirPlay::TryReconnect()
 
 bool CInputStreamAirPlay::Open(const kodi::addon::InputstreamProperty& props)
 {
+  Close();
   m_verbose = kodi::addon::GetSettingBoolean("debuglog", false);
 
   /*
@@ -179,11 +215,11 @@ bool CInputStreamAirPlay::Open(const kodi::addon::InputstreamProperty& props)
 
   /* The first message describes the session. Without it we cannot declare
    * streams, so wait for it rather than guessing. */
-  const int deadlineSlices = STREAMINFO_TIMEOUT_MS / READ_POLL_MS;
-  for (int i = 0; i < deadlineSlices && !m_haveInfo; ++i)
+  const auto deadline = Clock::now() + std::chrono::milliseconds(STREAMINFO_TIMEOUT_MS);
+  while (!m_aborted && RemainingMs(deadline) > 0 && !m_haveInfo)
   {
     apx_hdr hdr{};
-    if (!ReadExact(&hdr, sizeof(hdr), READ_POLL_MS))
+    if (!ReadExact(&hdr, sizeof(hdr), std::min(READ_POLL_MS, RemainingMs(deadline)), true))
     {
       if (m_eof)
         break;
@@ -197,13 +233,16 @@ bool CInputStreamAirPlay::Open(const kodi::addon::InputstreamProperty& props)
     }
     if (hdr.type == APX_MSG_STREAMINFO && hdr.size == sizeof(m_info))
     {
-      if (!ReadExact(&m_info, sizeof(m_info), 2000))
+      apx_streaminfo info{};
+      if (!ReadExact(&info, sizeof(info), std::min(2000, RemainingMs(deadline))) ||
+          !ValidateStreamInfo(info))
         break;
+      m_info = info;
       m_haveInfo = true;
       break;
     }
     /* Anything arriving before the stream info is not useful yet. */
-    if (!SkipPayload(hdr.size))
+    if (!SkipPayload(hdr.size, std::min(2000, RemainingMs(deadline))))
       break;
   }
 
@@ -248,6 +287,31 @@ void CInputStreamAirPlay::Close()
   m_sessionEnded = false;
   m_aborted = false;
   m_reconnectAttempts = 0;
+  m_nextReconnect = {};
+  m_info = {};
+  m_packetsRead = 0;
+  m_positionMs = 0;
+  m_durationMs = 0;
+  m_positionAnchorMs = 0;
+  m_lastAudioMs = 0;
+}
+
+bool CInputStreamAirPlay::ValidateStreamInfo(const apx_streaminfo& info)
+{
+  const bool videoValid = info.video_codec == APX_VCODEC_NONE ||
+                          info.video_codec == APX_VCODEC_H264 ||
+                          info.video_codec == APX_VCODEC_HEVC;
+  const bool audioValid = info.audio_ct == APX_ACT_NONE || info.audio_ct == APX_ACT_PCM ||
+                          info.audio_ct == APX_ACT_ALAC || info.audio_ct == APX_ACT_AAC_LC ||
+                          info.audio_ct == APX_ACT_AAC_ELD;
+  if (!videoValid || !audioValid || info.audio_extradata_size > sizeof(info.audio_extradata) ||
+      info.video_extradata_size > sizeof(info.video_extradata) ||
+      (info.video_codec == APX_VCODEC_NONE && info.audio_ct == APX_ACT_NONE))
+  {
+    kodi::Log(ADDON_LOG_ERROR, "airplay: invalid stream format");
+    return false;
+  }
+  return true;
 }
 
 std::string CInputStreamAirPlay::VideoCodecName() const
@@ -346,16 +410,20 @@ bool CInputStreamAirPlay::GetStream(int streamid, kodi::addon::InputstreamInfo& 
 
 bool CInputStreamAirPlay::OpenStream(int streamid)
 {
-  return true;
+  return (m_hasVideo && streamid == static_cast<int>(STREAM_ID_VIDEO)) ||
+         (m_hasAudio && streamid == static_cast<int>(STREAM_ID_AUDIO));
 }
 
 DEMUX_PACKET* CInputStreamAirPlay::DemuxRead()
 {
-  if (m_aborted || m_fd < 0)
+  if (m_aborted || m_sessionEnded)
     return nullptr;
 
+  if (m_fd < 0 || m_eof)
+    return TryReconnect() ? AllocateDemuxPacket(0) : nullptr;
+
   apx_hdr hdr{};
-  if (!ReadExact(&hdr, sizeof(hdr), READ_POLL_MS))
+  if (!ReadExact(&hdr, sizeof(hdr), READ_POLL_MS, true))
   {
     if (m_eof && !TryReconnect())
       return nullptr; /* session over, or the receiver is not coming back */
@@ -388,7 +456,8 @@ DEMUX_PACKET* CInputStreamAirPlay::DemuxRead()
       /* Not what this build expects. Take it off the socket anyway: leaving it
        * there turns the next header read into payload bytes, and the stream
        * ends as a framing error rather than one ignored message. */
-      SkipPayload(hdr.size);
+      if (!SkipPayload(hdr.size))
+        return TryReconnect() ? AllocateDemuxPacket(0) : nullptr;
       return AllocateDemuxPacket(0);
     }
     if (ReadExact(&progress, sizeof(progress), 2000))
@@ -397,6 +466,8 @@ DEMUX_PACKET* CInputStreamAirPlay::DemuxRead()
       m_durationMs = progress.duration_ms;
       m_positionAnchorMs = m_lastAudioMs.load();
     }
+    else
+      return TryReconnect() ? AllocateDemuxPacket(0) : nullptr;
     return AllocateDemuxPacket(0);
   }
 
@@ -404,28 +475,36 @@ DEMUX_PACKET* CInputStreamAirPlay::DemuxRead()
   {
     if (hdr.size != sizeof(m_info))
     {
-      SkipPayload(hdr.size); /* see the note in the progress branch */
+      if (!SkipPayload(hdr.size))
+        return TryReconnect() ? AllocateDemuxPacket(0) : nullptr;
       return AllocateDemuxPacket(0);
     }
     /* A mid-session format change: pick up the new values and tell Kodi. */
-    if (ReadExact(&m_info, sizeof(m_info), 2000))
+    apx_streaminfo info{};
+    if (ReadExact(&info, sizeof(info), 2000))
     {
+      if (!ValidateStreamInfo(info))
+        return nullptr;
+      DEMUX_PACKET* pkt = AllocateDemuxPacket(0);
+      if (!pkt)
+        return nullptr;
       const bool hadAudio = m_hasAudio;
+      m_info = info;
       m_hasAudio = m_info.audio_ct != APX_ACT_NONE;
       m_hasVideo = m_info.video_codec != APX_VCODEC_NONE;
       if (m_hasAudio != hadAudio)
         kodi::Log(ADDON_LOG_INFO, "airplay: audio track %s (ct=%u)",
                   m_hasAudio ? "appeared" : "went away", m_info.audio_ct);
-      DEMUX_PACKET* pkt = AllocateDemuxPacket(0);
       pkt->iStreamId = DEMUX_SPECIALID_STREAMCHANGE;
       return pkt;
     }
-    return AllocateDemuxPacket(0);
+    return TryReconnect() ? AllocateDemuxPacket(0) : nullptr;
   }
 
   if (hdr.type != APX_MSG_VIDEO && hdr.type != APX_MSG_AUDIO)
   {
-    SkipPayload(hdr.size);
+    if (!SkipPayload(hdr.size))
+      return TryReconnect() ? AllocateDemuxPacket(0) : nullptr;
     return AllocateDemuxPacket(0);
   }
 
@@ -436,7 +515,7 @@ DEMUX_PACKET* CInputStreamAirPlay::DemuxRead()
   if (hdr.size && !ReadExact(pkt->pData, hdr.size, 5000))
   {
     FreeDemuxPacket(pkt);
-    return nullptr;
+    return TryReconnect() ? AllocateDemuxPacket(0) : nullptr;
   }
 
   ++m_packetsRead;
