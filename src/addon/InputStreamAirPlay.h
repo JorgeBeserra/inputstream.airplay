@@ -9,6 +9,7 @@
 #include "../proto.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -44,10 +45,11 @@ public:
 
 private:
   /* Reads exactly len bytes, or returns false on timeout/error. */
-  bool ReadExact(void* buf, size_t len, int timeoutMs);
+  bool ReadExact(void* buf, size_t len, int timeoutMs, bool idleAllowed = false);
   /* Read and discard a payload this build has no use for, so the next header
    * read starts on a header. Sizes are capped before this is reached. */
-  bool SkipPayload(uint32_t size);
+  bool SkipPayload(uint32_t size, int timeoutMs = 2000);
+  static bool ValidateStreamInfo(const apx_streaminfo& info);
   bool Connect();
   bool TryReconnect();
   std::string VideoCodecName() const;
@@ -74,6 +76,7 @@ private:
   std::atomic<unsigned int> m_positionAnchorMs{0};
   std::atomic<unsigned int> m_lastAudioMs{0};
   int m_reconnectAttempts{0};
+  std::chrono::steady_clock::time_point m_nextReconnect{};
   /* Per-packet logging, off unless the add-on's debug setting is on. Read
    * once when the stream opens: an environment variable could not work here,
    * because this half runs inside Kodi rather than as a child of the service

@@ -1,0 +1,16 @@
+name: Demuxer regressions
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        compiler: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test Unix socket recovery and format validation with sanitizers
+        env:
+          CXX: ${{ matrix.compiler }}
+        run: python3 tests/run_regressions.py
